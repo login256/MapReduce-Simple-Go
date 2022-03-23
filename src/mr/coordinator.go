@@ -46,20 +46,23 @@ type WorkerInfo struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	MapTasks        []MapTask
-	ReduceTasks     []ReduceTask
-	Workers         []WorkerInfo
-	MapTaskQueue    []int
-	MapTaskCur      int
-	ReduceTaskQueue []int
-	ReduceTaskCur   int
-	CntWorker       int
-	R               int
-	M               int
-	WaitTask        *sync.Cond
-	Finish          bool
-	FinishCount     int
-	FinishMutex     sync.Mutex
+	MapTasks          []MapTask
+	ReduceTasks       []ReduceTask
+	Workers           []WorkerInfo
+	MapTaskQueue      []int
+	MapTaskCur        int
+	ReduceTaskQueue   []int
+	ReduceTaskCur     int
+	CntWorker         int
+	R                 int
+	M                 int
+	WaitTask          *sync.Cond
+	Finish            bool
+	FinishMapCount    int
+	FinishReduceCount int
+	RegisterMutex     sync.Mutex
+	FinishMutex       sync.RWMutex
+	StateCheckMutex   sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -75,6 +78,8 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
+	c.RegisterMutex.Lock()
+	defer c.RegisterMutex.Unlock()
 	c.CntWorker++
 	reply.WorkerId = c.CntWorker
 	reply.M = c.M
@@ -83,20 +88,20 @@ func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
 	return nil
 }
 
+//c.WaitTask.L need to be lock
 func (c *Coordinator) Redo(task_type int, task_id int) {
-	c.WaitTask.L.Lock()
 	is_full := false
 	if task_type == Task_Type_Map {
-		c.MapTasks[task_id].Status = Task_Idle
-		if c.MapTaskCur == len(c.MapTaskQueue) {
+		if !c.Finish && c.MapTaskCur == len(c.MapTaskQueue) && (c.FinishMapCount != len(c.MapTasks) || c.ReduceTaskCur == len(c.ReduceTaskQueue)) {
 			is_full = true
 		}
+		c.MapTasks[task_id].Status = Task_Idle
 		c.MapTaskQueue = append(c.MapTaskQueue, task_id)
 	} else if task_type == Task_Type_Reduce {
-		c.ReduceTasks[task_id].Status = Task_Idle
-		if c.ReduceTaskCur == len(c.ReduceTaskQueue) {
-			is_full = true
+		if !c.Finish && c.MapTaskCur == len(c.MapTaskQueue) && (c.FinishMapCount == len(c.MapTasks) && c.ReduceTaskCur == len(c.ReduceTaskQueue)) {
+			c.WaitTask.Signal()
 		}
+		c.ReduceTasks[task_id].Status = Task_Idle
 		c.ReduceTaskQueue = append(c.ReduceTaskQueue, task_id)
 	} else {
 		fmt.Print(errors.New("Wrong task type!"))
@@ -104,11 +109,12 @@ func (c *Coordinator) Redo(task_type int, task_id int) {
 	if is_full {
 		c.WaitTask.Signal()
 	}
-	c.WaitTask.L.Unlock()
 }
 
 func (c *Coordinator) CheckAlive(task_type int, task_id int) {
 	time.Sleep(10 * time.Second)
+	c.WaitTask.L.Lock()
+	defer c.WaitTask.L.Unlock()
 	if task_type == Task_Type_Map {
 		if c.MapTasks[task_id].Status != Task_Comleted {
 			//w := c.MapTasks[task_id].Worker
@@ -137,7 +143,7 @@ func (c *Coordinator) CheckAlive(task_type int, task_id int) {
 func (c *Coordinator) AskForTask(args *AskArgs, reply *AskReply) error {
 	c.WaitTask.L.Lock()
 	defer c.WaitTask.L.Unlock()
-	if !c.Finish && c.MapTaskCur == len(c.MapTaskQueue) && c.ReduceTaskCur == len(c.ReduceTaskQueue) {
+	if !c.Finish && c.MapTaskCur == len(c.MapTaskQueue) && (c.FinishMapCount != len(c.MapTasks) || c.ReduceTaskCur == len(c.ReduceTaskQueue)) {
 		c.WaitTask.Wait()
 	}
 	if c.Finish {
@@ -152,7 +158,7 @@ func (c *Coordinator) AskForTask(args *AskArgs, reply *AskReply) error {
 		c.MapTasks[id].Status = Task_In_Progress
 		c.MapTasks[id].Worker = args.WorkerId
 		go c.CheckAlive(Task_Type_Map, id)
-	} else if c.ReduceTaskCur < len(c.ReduceTaskQueue) {
+	} else if c.FinishMapCount == len(c.MapTasks) && c.ReduceTaskCur < len(c.ReduceTaskQueue) {
 		reply.Over = false
 		reply.TaskType = 1
 		reply.TaskId = c.ReduceTaskQueue[c.ReduceTaskCur]
@@ -167,27 +173,33 @@ func (c *Coordinator) AskForTask(args *AskArgs, reply *AskReply) error {
 }
 
 func (c *Coordinator) FinishMap(args *FinishMapArgs, reply *FinishMapReply) error {
-	c.FinishMutex.Lock()
-	defer c.FinishMutex.Unlock()
+	c.WaitTask.L.Lock()
+	defer c.WaitTask.L.Unlock()
 	if c.MapTasks[args.TaskId].Status != Task_Comleted {
 		c.MapTasks[args.TaskId].Status = Task_Comleted
 		//c.MapTasks[args.TaskId].MidFileName = args.FileName
 		c.MapTasks[args.TaskId].MidFileName = fmt.Sprintf("mr-inter-%d", args.TaskId)
+		c.FinishMapCount++
+		if c.FinishMapCount == len(c.MapTasks) {
+			c.WaitTask.Signal()
+		}
 	}
 	return nil
 }
 
 func (c *Coordinator) FinishReduce(args *FinishReduceArgs, reply *FinishReduceReply) error {
-	c.FinishMutex.Lock()
-	defer c.FinishMutex.Unlock()
+	c.WaitTask.L.Lock()
+	defer c.WaitTask.L.Unlock()
 	if c.ReduceTasks[args.TaskId].Status != Task_Comleted {
 		c.ReduceTasks[args.TaskId].Status = Task_Comleted
 		//c.MapTasks[args.TaskId].MidFileName = args.FileName
 		c.ReduceTasks[args.TaskId].FinalFileName = fmt.Sprintf("mr-out-%d", args.TaskId)
-		c.FinishCount++
+		c.FinishReduceCount++
 		reply.Over = false
-		if c.FinishCount == c.R {
+		if c.FinishReduceCount == c.R {
+			c.FinishMutex.Lock()
 			c.Finish = true
+			c.FinishMutex.Unlock()
 			reply.Over = true
 		}
 	}
@@ -215,6 +227,8 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
+	c.FinishMutex.RLock()
+	defer c.FinishMutex.RUnlock()
 	ret := c.Finish
 	return ret
 }
@@ -231,6 +245,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.M = len(files)
 	c.R = nReduce
 	c.MapTasks = make([]MapTask, len(files))
+	c.FinishMapCount = 0
 	c.MapTaskQueue = make([]int, len(files))
 	for i, f := range files {
 		c.MapTasks[i].Id = i
@@ -242,6 +257,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c.ReduceTasks = make([]ReduceTask, nReduce)
+	c.FinishReduceCount = 0
 	c.ReduceTaskQueue = make([]int, nReduce)
 
 	for i := 0; i < nReduce; i++ {

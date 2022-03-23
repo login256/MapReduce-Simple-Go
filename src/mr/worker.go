@@ -114,8 +114,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 					log.Fatal("Open inter file error!")
 				}
 				kv := KeyValue{}
-				fmt.Fscanf(ifile, "%v %v", &kv.Key, &kv.Value)
-				intermediate = append(intermediate, kv)
+				for {
+					n, _ := fmt.Fscanf(ifile, "%v %v", &kv.Key, &kv.Value)
+					if n == 0 {
+						break
+					}
+					intermediate = append(intermediate, kv)
+				}
 			}
 			sort.Sort(ByKey(intermediate))
 
