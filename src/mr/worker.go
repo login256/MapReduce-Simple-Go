@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -79,15 +80,17 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			file.Close()
 			intermediate := mapf(filename, string(content))
 			ofile := make([]*os.File, n_reduce)
+			enc := make([]*json.Encoder, n_reduce)
 			for i := 0; i < n_reduce; i++ {
 				ofile[i], err = ioutil.TempFile("", fmt.Sprintf("mr-tmp-%d-*", worker_id))
 				if err != nil {
 					fmt.Println(err)
 					log.Fatal("cannot open tempfile")
 				}
+				enc[i] = json.NewEncoder(ofile[i])
 			}
-			for i := 0; i < len(intermediate); i++ {
-				fmt.Fprintf(ofile[ihash(intermediate[i].Key)%n_reduce], "%v %v\n", intermediate[i].Key, intermediate[i].Value)
+			for _, kv := range intermediate {
+				enc[ihash(kv.Key)%n_reduce].Encode(kv)
 			}
 			mid_file_name := fmt.Sprintf("mr-inter-%d-", ask_reply.TaskId)
 			for i := 0; i < n_reduce; i++ {
@@ -113,10 +116,11 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 					fmt.Println(err)
 					log.Fatal("Open inter file error!")
 				}
+				dec := json.NewDecoder(ifile)
 				kv := KeyValue{}
 				for {
-					n, _ := fmt.Fscanf(ifile, "%v %v", &kv.Key, &kv.Value)
-					if n == 0 {
+					err := dec.Decode(&kv)
+					if err != nil {
 						break
 					}
 					intermediate = append(intermediate, kv)

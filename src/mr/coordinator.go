@@ -99,7 +99,7 @@ func (c *Coordinator) Redo(task_type int, task_id int) {
 		c.MapTaskQueue = append(c.MapTaskQueue, task_id)
 	} else if task_type == Task_Type_Reduce {
 		if !c.Finish && c.MapTaskCur == len(c.MapTaskQueue) && (c.FinishMapCount == len(c.MapTasks) && c.ReduceTaskCur == len(c.ReduceTaskQueue)) {
-			c.WaitTask.Signal()
+			is_full = true
 		}
 		c.ReduceTasks[task_id].Status = Task_Idle
 		c.ReduceTaskQueue = append(c.ReduceTaskQueue, task_id)
@@ -166,7 +166,7 @@ func (c *Coordinator) AskForTask(args *AskArgs, reply *AskReply) error {
 		go c.CheckAlive(Task_Type_Reduce, reply.TaskId)
 	} else {
 		err := errors.New("Unconditioned wake up!")
-		fmt.Println(err)
+		log.Fatalln(err)
 		return err
 	}
 	return nil
@@ -180,7 +180,7 @@ func (c *Coordinator) FinishMap(args *FinishMapArgs, reply *FinishMapReply) erro
 		//c.MapTasks[args.TaskId].MidFileName = args.FileName
 		c.MapTasks[args.TaskId].MidFileName = fmt.Sprintf("mr-inter-%d", args.TaskId)
 		c.FinishMapCount++
-		if c.FinishMapCount == len(c.MapTasks) {
+		if c.FinishMapCount == len(c.MapTasks) && c.ReduceTaskCur < len(c.ReduceTaskQueue) {
 			c.WaitTask.Signal()
 		}
 	}
@@ -201,6 +201,7 @@ func (c *Coordinator) FinishReduce(args *FinishReduceArgs, reply *FinishReduceRe
 			c.Finish = true
 			c.FinishMutex.Unlock()
 			reply.Over = true
+			c.WaitTask.Broadcast()
 		}
 	}
 	return nil
